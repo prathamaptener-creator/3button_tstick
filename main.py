@@ -31,83 +31,26 @@ import threading
 import time
 import websocket
 from erp import *
+from config import *
 # import schedule
 # import requests
 import json
 # import ui_sql
 # import numpy as np
-import hashlib
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 
-from datetime import time as dtime
-def get_current_shift():
-    now = datetime.datetime.now().time()
-    if dtime(6, 0) <= now < dtime(14, 0):
-        return 1
-    elif dtime(14, 0) <= now < dtime(22, 0):
-        return 2
-    return None
+def get_mysql_conn():
+    import pymysql
+    return pymysql.connect(**MYSQL_CONFIG)
 
 
-def is_calibration_required():
-    shift = get_current_shift()
-    if shift is None:
-        return False
-
-    conn = sqlite3.connect("c60_btn_jig.db")
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS jig_calibration_status (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shift INTEGER,
-            calibrated_at TEXT
-        )
-    """)
-
-    cur.execute("""
-        SELECT calibrated_at FROM jig_calibration_status
-        WHERE shift = ?
-        ORDER BY calibrated_at DESC LIMIT 1
-    """, (shift,))
-
-    row = cur.fetchone()
-    conn.close()
-
-    if not row:
-        return True
-
-    last_time = datetime.datetime.fromisoformat(row[0])
-    return last_time.date() != datetime.datetime.now().date()
 
 
-def mark_calibration_done():
-    shift = get_current_shift()
-    if shift is None:
-        return
 
-    conn = sqlite3.connect("c60_btn_jig.db")
-    cur = conn.cursor()
 
-    # ✅ ENSURE TABLE EXISTS (THIS WAS MISSING)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS jig_calibration_status (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shift INTEGER,
-            calibrated_at TEXT
-        )
-    """)
-
-    cur.execute(
-        "INSERT INTO jig_calibration_status (shift, calibrated_at) VALUES (?, ?)",
-        (shift, datetime.datetime.now().isoformat())
-    )
-
-    conn.commit()
-    conn.close()
 
 
 
@@ -544,22 +487,6 @@ class EmployeeEntry(QWidget):
         self.setLayout(main_layout)
 
 
-    # def fetch_details(self):
-    #   employee_id = self.emp_dropdown.currentText().strip()
-
-    #   if not employee_id:
-    #       QMessageBox.warning(self, "Error", "Please select an Employee ID")
-    #       return
-    #   job_card_id="9oijhb"
-    #   # job_card_id = fetch_job_card_for_employee(employee_id, "SF-C20-Device Button Test")
-    #   if not job_card_id:
-    #       QMessageBox.warning(self, "Error", "No Job Card Found")
-    #       return
-
-    #   # Success: Open test screen
-    #   self.test_window = Ui_MainWindow(employee_id, job_card_id)
-    #   self.test_window.show()
-    #   self.close()
 
     def show_model_buttons(self):
         employee_id = self.emp_dropdown.currentText().strip()
@@ -568,11 +495,7 @@ class EmployeeEntry(QWidget):
             return
 
         self.employee_id = employee_id
-        # self.job_card_id = fetch_job_card_for_employee(employee_id, "SF-C20-Device Button Test")
-        # self.job_card_id="123"
-        # if not self.job_card_id:
-        #     QMessageBox.warning(self, "Error", "No Job Card Found")
-        #     return
+       
             
         # Show buttons
         for btn in [self.BUTTON,self.TSTICK]:
@@ -594,8 +517,8 @@ class EmployeeEntry(QWidget):
         test_type = model_to_test_type.get(model_name)
         print("📦 Test Type being searched:", test_type)
         print(self.employee_id)
-        # ~ self.job_card_id = fetch_job_card_for_employee(self.employee_id, test_type)
-        self.job_card_id="Testing"
+        self.job_card_id = fetch_job_card_for_employee(self.employee_id, test_type)
+        # self.job_card_id="Testing"
     
 
         if not self.job_card_id:
@@ -615,35 +538,11 @@ class EmployeeEntry(QWidget):
         self.test_window.home_gcode()
         self.close()
 
-# class PressDipDetector:
-#     """Detect a pressing valley, including flat bottoms and gradual recovery."""
-#     def __init__(self, threshold=0.01):
-#         self.threshold = threshold
-#         self.peak = None
-#         self.valley = None
 
-#     def update(self, force):
-#         if not math.isfinite(force):
-#             return None
-#         if self.peak is None:
-#             self.peak = force
-#         if self.valley is None:
-#             if self.peak - force > self.threshold + 1e-9:
-#                 self.valley = force
-#             else:
-#                 self.peak = max(self.peak, force)
-#         else:
-#             self.valley = min(self.valley, force)
-#             if force - self.valley > self.threshold + 1e-9:
-#                 value = self.valley
-#                 self.peak, self.valley = force, None
-#                 if 3 <= value < 15:
-#                     return value
-#         return None
 
 class PressDipDetector:
     """Detect a dip and return the force at its onset."""
-    def __init__(self, threshold=0.01):
+    def __init__(self, threshold=DIP_THRESHOLD):
         self.threshold = threshold
         self.peak = None
         self.valley = None
@@ -854,8 +753,8 @@ class SerialThread(QThread):
                     if not state["cancelled"]:
                         if state["dip"] is None:
                             state["dip"] = detector.update(force)
-                        target = 15.0 if state["dip"] is None else state["dip"] + 2.0
-                        if force >= target or force >= 17.0:
+                        target = PRESS_TARGET_FORCE if state["dip"] is None else state["dip"] + POST_DIP_EXTRA_FORCE
+                        if force >= target or force >= PRESS_MAX_FORCE:
                             state["cancelled"] = True
                             self.ser.write(b"\x85")  # cancel jog immediately
                 self._grbl_condition.notify_all()
@@ -869,7 +768,7 @@ class SerialThread(QThread):
                     while state["last"] is None:
                         self._check_motion_wait(deadline, "waiting for fresh force data")
                         self._grbl_condition.wait(0.01)
-                    if state["force"] >= 15.0:
+                    if state["force"] >= PRESS_TARGET_FORCE:
                         raise RuntimeError("Force is already at/above 15 N before pressing")
                     ack_before = self._ack_count
                     status_before = self._status_count
@@ -877,7 +776,7 @@ class SerialThread(QThread):
                     # Command submission and arming are atomic with sensor decisions.
                     self.ser.write(f"$J=G91 G21 Z{max_travel_mm:g} F50\n".encode("ascii"))
                     state["active"] = True
-                    deadline = time.monotonic() + 20.0
+                    deadline = time.monotonic() + PRESS_TIMEOUT
                     next_query = 0.0
                     stop_status_before = None
                     while True:
@@ -929,15 +828,9 @@ class SerialThread(QThread):
 
 # Daily golden-device calibration settings (24-hour IST).
 # Keep independent golden devices and limits for each selected model.
-DAILY_CALIBRATION = {
-    "BUTTON": {"start": (14, 0), "end": (20, 0), "serial": "GD-BUTTON-001",
-               "limits": {"right": (5.0, 13.0), "centre": (4.0, 13.0), "left": (5.0, 13.0)}},
-    "TSTICK": {"start": (14, 0), "end": (20, 0), "serial": "GD-TSTICK-001",
-               "limits": {"joystick": (5.0, 13.0), "tstick": (5.0, 13.0)}},
-}
 import datetime as calibration_datetime
 import os as calibration_os
-DAILY_CALIBRATION_DB = calibration_os.path.join(calibration_os.path.dirname(calibration_os.path.abspath(__file__)), "daily_jig_calibration.db")
+
 CALIBRATION_IST = calibration_datetime.timezone(calibration_datetime.timedelta(hours=5, minutes=30))
 
 def daily_calibration_now():
@@ -945,8 +838,8 @@ def daily_calibration_now():
 
 # BCM numbering: GPIO8=physical24, GPIO10=physical19, GPIO17=physical11.
 # Dry contacts to GND only; internal pull-ups make a press active LOW.
-GPIO_BUTTON_PINS = {"right": 17, "centre": 10, "left": 8}
-GPIO_RESPONSE_TIMEOUT = 1.0
+
+
 
 class HarnessGPIOCheck:
     def __init__(self):
@@ -966,6 +859,18 @@ class HarnessGPIOCheck:
         except Exception:
             self.close()
             raise
+
+    def reset(self):
+        """Start another run without recreating GPIO pins or callbacks."""
+        with self.lock:
+            self.expected = None
+            self.seen.clear()
+            self.errors.clear()
+
+    def disarm(self):
+        with self.lock:
+            self.expected = None
+            self.seen.clear()
 
     def _pressed(self, key):
         with self.lock:
@@ -997,10 +902,74 @@ class HarnessGPIOCheck:
             factory.close()
 
 
+def button_failure_issue(dips, responses):
+    """Describe only failed button checks for ERP's issue field."""
+    failures = []
+    for key, label, low, high in (("right", "Right", 5, 13),
+                                  ("centre", "Centre", 4, 13),
+                                  ("left", "Left", 5, 13)):
+        value = dips.get(key)
+        if value is None:
+            failures.append(f"{label} DIP missing")
+        elif not low <= float(value) <= high:
+            failures.append(f"{label} DIP failed: {float(value):g} N")
+        if not responses.get(key, False):
+            failures.append(f"{label} button not functioning")
+    return "; ".join(failures)
+
+
+def short_gpio_status(dips, responses):
+    """Only failed checks; full explanation is stored in issue."""
+    parts = []
+    for key, label, low, high in (("right", "R", 5, 13),
+                                  ("centre", "C", 4, 13),
+                                  ("left", "L", 5, 13)):
+        value = dips.get(key)
+        if value is None:
+            parts.append(f"{label} DIP missing")
+        elif not low <= float(value) <= high:
+            parts.append(f"{label} DIP={float(value):.2f}N")
+        if not responses.get(key, False):
+            parts.append(f"{label} GPIO fail")
+    return "; ".join(parts)[:140]
+
+
+def shorten_pending_gpio_records():
+    """Repair old oversized GPIO payloads in the local retry queue."""
+    try:
+        with sqlite3.connect(DB_FILE) as db:
+            rows = db.execute("SELECT rowid, dips FROM job_card_fail WHERE system=?",
+                              ("3BUTTONButtonDisplacement",)).fetchall()
+            for row_id, payload in rows:
+                try:
+                    data = json.loads(payload)
+                    if not isinstance(data, dict) or not isinstance(data.get("dips"), dict) or not isinstance(data.get("gpio"), dict):
+                        continue
+                    text = short_gpio_status(data["dips"], data["gpio"])
+                except (TypeError, ValueError):
+                    continue
+                db.execute("UPDATE job_card_fail SET dips=?, issue=? WHERE rowid=?",
+                           (text, button_failure_issue(data["dips"], data["gpio"]), row_id))
+    except Exception as exc:
+        print(f"Could not shorten pending GPIO records: {exc}", flush=True)
+
+
 def insert_gpio_fail_record(serial, model, batch, employee, job_card, dips, reason, responses):
-    """Queue GPIO and DIP failures with the same button issue names."""
-    return insert_fail_record(serial, model, batch, employee, job_card, dips,
-                              gpio_responses=responses)
+    """Queue a short force/GPIO summary for the ERP button_status field."""
+    if not employee or not job_card:
+        return False
+    try:
+        with sqlite3.connect(DB_FILE) as db:
+            db.execute("""INSERT INTO job_card_fail
+                (device_serial_number,model,batch,employee_id,job_card_id,qc_system,system,issue,status,dips,timestamp)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (serial,model,batch,employee,job_card,"CASSINI-02","3BUTTONButtonDisplacement",button_failure_issue(dips, responses),"fail",
+                 short_gpio_status(dips, responses), daily_calibration_now().strftime("%Y-%m-%d %H:%M:%S")))
+        retry_records()
+        return True
+    except Exception as exc:
+        print(f"GPIO failure could not be queued: {exc}", flush=True)
+        return False
 
 class Ui_MainWindow(QMainWindow):
 
@@ -1261,6 +1230,17 @@ class Ui_MainWindow(QMainWindow):
     #         self.label_2.setText(f"Error: {e}")
 
     def closeEvent(self, event):
+        # Never close GPIO underneath an active motion/test worker.
+        if self._daily_busy():
+            QMessageBox.warning(self, "Test in progress", "Wait for homing or the current test to finish before closing.")
+            event.ignore()
+            return
+        try:
+            if self._gpio_check is not None:
+                self._gpio_check.close()
+                self._gpio_check = None
+        except Exception as e:
+            print(f"GPIO cleanup error: {e}")
         try:
             if hasattr(self, "serial_thread"):
                 self.serial_thread.stop()
@@ -1277,7 +1257,7 @@ class Ui_MainWindow(QMainWindow):
         self.selected_model = model_name
         self.setupUi(self)
 
-        self.serial_thread = SerialThread('/dev/ttyUSB0', '/dev/ttyUSB1', 115200)#arduino,grbl
+        self.serial_thread = SerialThread(ARDUINO_PORT, GRBL_PORT, SERIAL_BAUDRATE)#arduino,grbl
 
         self.serial_thread.data_received.connect(self.handle_data)
         
@@ -1289,27 +1269,14 @@ class Ui_MainWindow(QMainWindow):
         self.data5=[]
         self.serial_number = None
         self._gpio_check = None
+        shorten_pending_gpio_records()
         self.gpio_validation = {}
         self.gpio_failures = {}
 
 
-                # ---------------- JIG CALIBRATION FLAGS ----------------
         self.home_done = False
-        self.jig_calibrated = False
         self.is_jig_calibration = False
-        self.calibration_authorized = False
-        # ---------------- CHECK SHIFT CALIBRATION STATUS ----------------
-        
-        self.jig_calibrated = True
-        self.calibration_authorized = True
         self._init_daily_calibration()
-        # else:
-        #   self.jig_calibrated = False
-        #   self.calibration_authorized = False
-        #   self.label_2.setText("SCAN CALIB SERIAL → PRESS HOME")
-        #   self.pushButton_19.setEnabled(False)
-        # 🔐 BLOCK calibration until serial verified
-
 
         # ui_sql.online_status(self)
         def read_serial_data(self):
@@ -1866,251 +1833,9 @@ class Ui_MainWindow(QMainWindow):
 
 
 
-    # def handle_home_complete(self, data):
-    #     if "ok" in data.lower():
-    #         self.label_2.setText("HOME DONE")
-
-    #         if not self.jig_calibrated:
-    #             self.start_jig_calibration()
-    #         else:
-    #             self.enable_run_mode()
-
     def handle_home_complete(self, data):
         if "ok" in data.lower():
             QtCore.QTimer.singleShot(0, self._handle_home_complete_ui)
-
-
-    def start_jig_calibration(self):
-        self.is_jig_calibration = True
-        self.label_2.setText("JIG CALIBRATION RUNNING")
-
-        self.clear_all_datas()
-        self.start_serial()
-
-        # SAME motion as production, but treated as calibration
-        self.send_gcode("G0 X214 y68 z20",self.handle_data_btn1)
-            # self.label_2.setText("FUNCTIONALITY DONE")     
-        self.send_gcode("G1 Z26.5 f80",self.handle_data_btn1)
-        self.send_gcode("G0 Z17",self.handle_data_btn1)#15.1
-        time.sleep(20)
-        self.send_gcode_btn2()
-        time.sleep(12)
-        self.send_gcode_btn3()
-        time.sleep(12)
-        self.send_tstick_btn1()
-        time.sleep(8)
-        self.send_tstick_btn2()
-        time.sleep(8)
-        self.finish_jig_calibration()
-        
-    def select_calibration_dip(self, dips, min_force=5, max_force=20):
-        """
-        From a list of dips, select the actual calibration dip.
-        Rule: smallest valid dip within range.
-        """
-        valid = [d for d in dips if min_force <= d <= max_force]
-        return min(valid) if valid else None
-
-        
-    def generate_c60_calibration_doc(self,employee, dips, result):
-            date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-            time_str = datetime.datetime.now().strftime("%H:%M:%S")
-            safe_time= time_str.replace(":", "")
-            filename = f"C60_Button_Calibration_Report_{date_str}_{safe_time}.pdf"
-
-            doc = SimpleDocTemplate(filename, pagesize=A4)
-            styles = getSampleStyleSheet()
-            elements = []
-
-            # ---- Title ----
-            elements.append(Paragraph("<b>BUTTON Button Calibration Report</b>", styles["Title"]))
-            elements.append(Paragraph(f"Date: {date_str}", styles["Normal"]))
-            elements.append(Paragraph(f"Time: {time_str}", styles["Normal"]))
-            elements.append(Paragraph(f"Employee: {employee}", styles["Normal"]))
-            elements.append(Paragraph("<br/>", styles["Normal"]))
-
-            # ---- Table Data ----
-            table_data = [
-                ["Right Dip (N)", "Centre Dip (N)", "Left Dip (N)", "Joystick Dip (N)", "Tstick Dip (N)",   "Result"],
-                [
-                    f"{dips['right']}",
-                    f"{dips['centre']}",
-                    f"{dips['left']}",
-                    f"{dips['joystick']}",
-                    f"{dips['tstick']}",
-
-
-
-                    "PASS" if result else "FAIL"
-                ]
-            ]
-
-            table = Table(table_data, colWidths=[100, 100, 100, 80])
-            table.setStyle(TableStyle([
-                ("GRID", (0,0), (-1,-1), 1, colors.black),
-                ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
-                ("ALIGN", (0,0), (-1,-1), "CENTER"),
-                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-            ]))
-
-            elements.append(table)
-
-            doc.build(elements)
-
-            print(f"📄 Calibration document created: {filename}")
-
-
-
-
-
-    def plot_calibration_graph(self):
-        x1, y1 = self.parse_data(self.data1)
-        x2, y2 = self.parse_data(self.data2)
-        x3, y3 = self.parse_data(self.data3)
-        x4, y4 = self.parse_data(self.data4)
-        x5, y5 = self.parse_data(self.data5)
-
-        # ---- SAME EMA LOGIC AS NORMAL PLOT ----
-        alpha = 0.99
-
-        def ema(values):
-            if not values:
-                return []
-            z = [0]
-            for i in range(1, len(values)):
-                z.append(z[i-1] * alpha + (1 - alpha) * values[i])
-            return z
-
-        z1 = ema(y1)
-        z2 = ema(y2)
-        z3 = ema(y3)
-        z4 = ema(y4)
-        z5 = ema(y5)
-
-        # ---- CLEAR GRAPH (same as normal) ----
-        self.clear_graph()
-
-        # ---- SAME PLOTTING STYLE ----
-        plt.figure(figsize=(4, 3))
-
-        plt.plot(z1, x1, label="Right")
-        plt.plot(z2, x2, label="Centre")
-        plt.plot(z3, x3, label="Left")
-        plt.plot(z4, x4, label="joystick")
-        plt.plot(z5, x5, label="tstick")
-
-        plt.xlabel("Displacement (mm)")
-        plt.ylabel("Force (N)")
-        plt.title("Jig Calibration")
-        plt.legend()
-
-        imageName = f"calibration_{datetime.datetime.now().strftime('%H%M%S')}.svg"
-        plt.savefig(imageName)
-        plt.show()
-        plt.close()
-        plt.cla()
-        plt.clf()
-
-        # ---- DISPLAY INSIDE graph_widget (same as normal) ----
-        for i in reversed(range(self.graph_widget.layout().count())):
-            self.graph_widget.layout().itemAt(i).widget().setParent(None)
-
-        pixmap = QtGui.QPixmap(imageName)
-        label = QtWidgets.QLabel(self.graph_widget)
-        label.setMaximumSize(QtCore.QSize(300, 250))
-        label.setPixmap(pixmap)
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        label.setScaledContents(True)
-        self.graph_widget.layout().addWidget(label)
-
-
-
-    def finish_jig_calibration(self):
-        x1,y1 = self.parse_data(self.data1)
-        x2,y2 = self.parse_data(self.data2)
-        x3,y3 = self.parse_data(self.data3)
-        x4,y4 = self.parse_data(self.data4)
-        x5,y5 = self.parse_data(self.data5)
-        
-
-        raw_dips = {
-            "right": self.filter_dips(self.find_dips(x1), "right"),
-            "centre": self.filter_dips(self.find_dips(x2), "centre"),
-            "left": self.filter_dips(self.find_dips(x3), "left"),
-            "joystick": self.filter_dips(self.find_dips(x4), "tstick"),
-            "tstick": self.filter_dips(self.find_dips(x5), "joystick"),
-        }
-
-        # ❌ FAIL if ANY button has no dip
-        for k, v in raw_dips.items():
-            if not v:
-                print(f"❌ No dip detected for {k}")
-                self.label_2.setText("CALIBRATION FAIL ❌")
-                dlg = PremiumMessageBox(self, "fail", "Calibration Failed",
-                    "No button detected.\nPlace device and re-home.")
-                dlg.exec_()
-                return
-
-        # ✅ SAME dip selection logic as normal flow
-        dips = {k: v[0] for k, v in raw_dips.items()}
-        qc_system="C60FamilyBDTJ01"
-
-
-        if self.is_calibration_pass(dips):
-            self.plot_calibration_graph()
-
-            self.generate_c60_calibration_doc(
-                employee=self.employee_id,
-                dips=dips,
-                result=True
-            )
-
-            send_jig_pass(
-                employee=self.employee_id,
-                dips=dips,
-                qc_system=qc_system,
-                status="PASS"
-            )
-
-            self.jig_calibrated = True
-            self.is_jig_calibration = False
-            mark_calibration_done()
-
-            dlg = PremiumMessageBox(self, "pass", "Calibration Passed",
-                "Jig calibration PASSED.\nYou can proceed with button test.")
-            dlg.exec_()
-
-            
-            self.enable_run_mode()
-        else:
-            self.label_2.setText("CALIBRATION FAIL ❌")
-            dlg = PremiumMessageBox(self, "fail", "Calibration Failed",
-                "Jig calibration failed.\nPlease re-home.")
-            dlg.exec_()
-            send_jig_pass(
-                employee=self.employee_id,
-                dips=dips,
-                qc_system=qc_system,
-                status="FAIL"
-            )
-    def is_calibration_pass(self, dips):
-        MIN_FORCE =  5 
-        MAX_FORCE = 13
-
-        for k in ["right", "centre", "left", "joystick", "tstick"]:
-            dip = dips.get(k)
-
-            if dip is None:
-                print(f"❌ No valid dip for {k}")
-                return False
-
-            if not (MIN_FORCE <= dip <= MAX_FORCE):
-                print(f"❌ Dip out of range for {k}: {dip}")
-                return False
-
-            print(f"✅ {k} calibration OK: {dip}")
-
-        return True
 
     def enable_run_mode(self):
         self.label_2.setText("READY FOR TEST")
@@ -2119,10 +1844,7 @@ class Ui_MainWindow(QMainWindow):
     
 
     def start_serial(self):
-        # self.pushButton_19.setEnabled(False)
-
-        # self.start_button.setEnabled(False)
-    #     self.stop_button.setEnabled(True)
+      
         self.clear_all_datas()
         if not self.serial_thread.isRunning():
             self.serial_thread.start()
@@ -2142,16 +1864,7 @@ class Ui_MainWindow(QMainWindow):
             return jsonify({"success": False, "status": f"Error: {e}"})
 
 
-    # def validate_serial_1(self,serial_number):
-    #     return True
-    #     url = 'http://192.168.0.200:8000/validate_serial_1/' + serial_number
-    #     response = requests.get(url)
-    #     if response.status_code == 200:
-    #         print("Serial number is valid")
-    #         return True
-    #     else:
-    #         print("Serial number not found")
-    #         return False
+    
     def home_gcode(self):
         if getattr(self, "_homing_busy", False):
             return
@@ -2185,133 +1898,17 @@ class Ui_MainWindow(QMainWindow):
         if "ok" in data.lower():
             QtCore.QTimer.singleShot(0, self._handle_home_complete_ui)
 
-    # def _handle_home_complete_ui(self):
-    #     self.label_2.setText("HOME DONE")
-
-    #     if self.calibration_authorized and not self.jig_calibrated:
-    #         self.start_jig_calibration()
-    #     else:
-    #         self.label_2.setText("SCAN CALIBRATION SERIAL")
-
     @QtCore.pyqtSlot()
     def _handle_home_complete_ui(self):
         self.enable_run_mode()
         self._refresh_daily_calibration()
 
 
-    def is_valid_calibration_serial(self, serial: str) -> bool:
-        # 🔒 HARD-CODED HASH OF GOLDEN SERIAL
-        ALLOWED_HASH = "e99a18c428cb38d5f260853678922e03"  # example
-
-        hashed = hashlib.md5(serial.encode()).hexdigest()
-        print("CALIB HASH:", hashed)
-
-        return hashed == ALLOWED_HASH
 
 
-
-    def validate_model_only(self,serial_number, selected_model):
-        return True
-        server_url = "ws://192.168.0.200:8050"
-
-        try:
-            ws = websocket.create_connection(server_url, timeout=5)
-            print("🌐 Connected to WebSocket server")
-
-            # normalize selected model
-            selected_model = (selected_model or "").replace("_", "")
-
-            # ================================
-            # 🔹 MODEL VALIDATION ONLY
-            # ================================
-            ws.send(json.dumps({
-                "type": "model",
-                "serial": serial_number
-            }))
-
-            response = json.loads(ws.recv())
-            print("model response:", response)
-
-            if response.get("status") != "success":
-                ws.close()
-                return False, "Model not found in WS"
-
-            data = response.get("data")
-            if not data or not isinstance(data, list):
-                ws.close()
-                return False, "Invalid model data"
-
-            model_code = data[0].get("model")
-            if not model_code:
-                ws.close()
-                return False, "Model missing in response"
-
-            # 🔹 mapping
-            model_mapping = {
-                "29": "c60",
-                "30": "c40",
-                "28": "c60plus",
-                "27": "C60PRO",
-            }
-
-            expected_model = model_mapping.get(str(model_code))
-
-            if not expected_model:
-                ws.close()
-                return False, f"Unknown model code: {model_code}"
-
-            # 🔥 FINAL CHECK
-            if expected_model != selected_model:
-                ws.close()
-                return False, f"Model mismatch (WS: {expected_model}, Selected: {selected_model})"
-
-            ws.close()
-            return True, "Model validation passed"
-
-        except Exception as e:
-            return False, f"Validation error: {e}"
-
-
-
-    # def check_serial_exists(self,serial_number):
-        
-       
-    #   """
-    #   Check if serial number exists in ERP under the given system.
-    #   Returns True if exists, False if not.
-    #   """
-    #   SYSTEM_NAME =["3buttoniptesting"]
-    #   filters = [
-    #       ["3_button_serialnumber", "=", serial_number.strip()],
-    #       ["system", "in", SYSTEM_NAME],
-    #       ["status", "=", "pass"]
-    #   ]
-
-    #   try:
-    #       response = requests.get(
-    #           ERP_PASS,
-    #           headers=HEADERS,
-    #           params={"filters": json.dumps(filters)}
-    #       )
-
-    #       if response.status_code != 200:
-    #           print(f"❌ ERP Error: Status code {response.status_code}")
-    #           return False  # Treat error as not found (or handle as needed)
-
-    #       data = response.json()
-    #       results = data.get("data", [])
-
-    #       if results:
-    #           print(f"❌ Serial number '{serial_number}' already exists in '{SYSTEM_NAME}'")
-    #           return True
-    #       else:
-    #           print(f"✅ Serial number '{serial_number}' is new in '{SYSTEM_NAME}'")
-    #           return False
-
-    #   except Exception as e:
-    #       print(f"⚠️ Exception connecting to ERP: {e}")
-    #       return False
     def check_serial_exists(self, serial_number):
+        if not VALIDATE_FUNCTIONALITY:
+            return True
         
         """
         Check functionality PASS based on selected model.
@@ -2328,12 +1925,10 @@ class Ui_MainWindow(QMainWindow):
         model = (self.selected_model or "").strip().upper()
 
         if model == "BUTTON":
-            serial_field = "3_button_serialnumber"
-            system_name = "3buttoniptesting"
+            serial_field, system_name = FUNCTIONALITY_STAGES["BUTTON"]
 
         elif model == "TSTICK":
-            serial_field = "t_stick_serialnumber"
-            system_name = "TStickFunctionality"
+            serial_field, system_name = FUNCTIONALITY_STAGES["TSTICK"]
 
         else:
             print(f"❌ Unsupported model for serial check: {model}")
@@ -2380,100 +1975,9 @@ class Ui_MainWindow(QMainWindow):
 
 
 
-    def validate_serial_1(self, serial_number):
-        return True
-
-        server_url = "ws://192.168.0.200:8050"
-
-        try:
-            ws = websocket.create_connection(server_url)
-            print("🌐 Connected to WebSocket server")
-
-        # --- Step 1: Model Validation ---
-            message_model = {
-                "type": "model",
-                "serial": serial_number
-            }
-            ws.send(json.dumps(message_model))
-            response_model = ws.recv()
-            data_model = json.loads(response_model)
-
-            if data_model.get("status") == "success" and "data" in data_model:
-                first_entry = data_model["data"][0]
-                model_code = first_entry.get("model")
-
-                if model_code is not None:
-                    self.model = str(model_code)
-                    print("📦 Model Type from server:", self.model)
-
-                    model_mapping = {
-                        "29": "BUTTON",
-                        "22":"TSTICK",
-                        "28": "C60PLUS",
-                        "27": "C60PRO",
-                    
-                    }
-
-                    expected_model = model_mapping.get(self.model)
-                    selected_model = self.comboBox.currentText().strip().upper()
-
-                    if expected_model != selected_model:
-                        print(f"❌ Mismatch: Expected '{expected_model}', but selected '{selected_model}'")
-                        QtWidgets.QMessageBox.warning(self, "Model Mismatch",
-                            f"Selected device is '{selected_model}', but serial belongs to '{expected_model}'.")
-                        ws.close()
-                        return False
-                    else:
-                        print("✅ Model validation passed.")
-                else:
-                    print("⚠️ Model type not found in response.")
-                    ws.close()
-                    return False
-            else:
-                print("❌ Unexpected or error response (model):", data_model)
-                ws.close()
-                return False
-
-            
-            message = {
-                "type": "functionality",
-                "serial": serial_number,
-                "stage":6
-                
-            }
-            ws.send(json.dumps(message))
-            response_func = ws.recv()
-            data_func = json.loads(response_func)
-            try:
-                ws.send(json.dumps(message))
-                response = ws.recv()
-                data_func = json.loads(response)
-
-                status = data_func.get("status", 0)
-                print(data_func)
-
-                status=data_func.get("status")
-                if status == "exists":
-                    print("✅ Functionality check passed.")
-                    return True
-                elif status=="not_found":
-                    print("❌ Functionality not completed for this serial.")
-                    ws.close()
-                    return False
-                else:
-                    print("❌ Unexpected status:", status)
-                    return False
-
-            except Exception as e:
-                print(f"❗ Error validating serial '{serial_number}':", e)
-                return False
-
-        except Exception as e:
-            print(f"❗ Error validating serial '{serial_number}':", e)
-            return False
 
     def check_serial(self,serial_number): 
-        server_url = "ws://192.168.0.200:8050"
+        server_url = WEBSOCKET_URL
 
         try:
             ws = websocket.create_connection(server_url)
@@ -2529,27 +2033,24 @@ class Ui_MainWindow(QMainWindow):
         self.clear_graph()
         self.start_serial()
         self.serial_number = self.lineEdit_3.text().strip()
+        if not self.is_jig_calibration:
+            # Production devices must pass the previous-stage and rejection gates.
+            # ~ if not self.check_serial_exists(self.serial_number):
+                # ~ self.label_2.setText("Previous stage not done")
+                # ~ self.pushButton_19.setEnabled(True)
+                # ~ return
 
-        # Quick validations on main thread (fast, no sleep)
-        # ~ if not self.check_serial_exists(self.serial_number):
-            # ~ self.label_2.setText("FUNCTIONALITY NOT DONE")
-            # ~ self.pushButton_19.setEnabled(True)
-            # ~ return
-        # if not self.validate_model_only(self.serial_number, self.selected_model):
-        #   self.label_2.setText("Model mismatch")
-        #   self.pushButton_19.setEnabled(True)
-        #   return
-        if check_serial_existss(self.serial_number):
-          self.label_2.setText("Already failed")
-          self.pushButton_19.setEnabled(True)
-          return
-        # if check_serial_existss_nova(self.serial_number):
-        #   self.label_2.setText("Nova failed Please debug")
-        #   self.pushButton_19.setEnabled(True)
-        #   return
+            # ~ if check_serial_existss(self.serial_number):
+                # ~ self.label_2.setText("Already failed")
+                # ~ self.pushButton_19.setEnabled(True)
+                # ~ return
 
-        print("Serial number is valid. Proceeding...")
-        self.label_2.setText("Serial number is valid.")
+            print("Serial number is valid. Proceeding...")
+            self.label_2.setText("Serial number is valid.")
+        else:
+            # Golden devices are independent of production functionality/results.
+            print("Golden-device calibration: skipping functionality and rejection checks.")
+            self.label_2.setText("Golden-device calibration running.")
 
         self._test_thread = threading.Thread(target=self._run_test, daemon=True)
         self._test_thread.start()
@@ -2563,7 +2064,9 @@ class Ui_MainWindow(QMainWindow):
             self.gpio_failures = {}
             if self.selected_model == "BUTTON":
                 try:
-                    self._gpio_check = HarnessGPIOCheck()
+                    if self._gpio_check is None:
+                        self._gpio_check = HarnessGPIOCheck()
+                    self._gpio_check.reset()
                 except Exception as exc:
                     QtCore.QMetaObject.invokeMethod(self, "_gpio_setup_failed", QtCore.Qt.QueuedConnection,
                         QtCore.Q_ARG(str, str(exc)))
@@ -2619,8 +2122,8 @@ class Ui_MainWindow(QMainWindow):
                 QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, message))
         finally:
             if self._gpio_check is not None:
-                self._gpio_check.close()
-                self._gpio_check = None
+                # Keep the pin factory and callbacks alive for the next Run.
+                self._gpio_check.disarm()
             self.serial_thread.callback = self.handle_data
             if self.serial_thread.isRunning():
                 self.serial_thread.stop()
@@ -2756,7 +2259,7 @@ class Ui_MainWindow(QMainWindow):
 
 
 
-    def find_dips(self, x_values, threshold=0.01, force_one=False):
+    def find_dips(self, x_values, threshold=DIP_THRESHOLD, force_one=False):
             dips = []
             cleaned = [x for x in x_values if x > 0]
             if not cleaned:
@@ -2783,7 +2286,7 @@ class Ui_MainWindow(QMainWindow):
 
     def filter_dips(self, dips, curve_name):
         if curve_name.lower() in [ "right","centre","left","joystick","tstick"]:
-            return [d for d in dips if 3 <= d <=18]
+            return [d for d in dips if FILTER_DIP_RANGE[0] <= d <= FILTER_DIP_RANGE[1]]
         else:
             return dips
     def pause_gcode(self):
@@ -2942,15 +2445,15 @@ class Ui_MainWindow(QMainWindow):
                 c = dips["centre"][0]
                 l = dips["left"][0]
 
-                if not (5 <= r <= 13):
+                if not (PRODUCTION_LIMITS["BUTTON"]["right"][0] <= r <= PRODUCTION_LIMITS["BUTTON"]["right"][1]):
                     auto_result = "0"
                     fail_reason = f"Right DIP out of range ({r}N)"
 
-                elif not (4 <= c <= 13):
+                elif not (PRODUCTION_LIMITS["BUTTON"]["centre"][0] <= c <= PRODUCTION_LIMITS["BUTTON"]["centre"][1]):
                     auto_result = "0"
                     fail_reason = f"Centre DIP out of range ({c}N)"
 
-                elif not (5 <= l <= 13):
+                elif not (PRODUCTION_LIMITS["BUTTON"]["left"][0] <= l <= PRODUCTION_LIMITS["BUTTON"]["left"][1]):
                     auto_result = "0"
                     fail_reason = f"Left DIP out of range ({l}N)"
 
@@ -2969,11 +2472,11 @@ class Ui_MainWindow(QMainWindow):
                 j = dips["joystick"][0]
                 t = dips["tstick"][0]
 
-                if not (5 <= j <= 13):
+                if not (PRODUCTION_LIMITS["TSTICK"]["joystick"][0] <= j <= PRODUCTION_LIMITS["TSTICK"]["joystick"][1]):
                     auto_result = "0"
                     fail_reason = f"Joystick DIP out of range ({j}N)"
 
-                elif not (5 <= t <= 13):
+                elif not (PRODUCTION_LIMITS["TSTICK"]["tstick"][0] <= t <= PRODUCTION_LIMITS["TSTICK"]["tstick"][1]):
                     auto_result = "0"
                     fail_reason = f"T-Stick DIP out of range ({t}N)"
 
@@ -3037,11 +2540,11 @@ class Ui_MainWindow(QMainWindow):
             self.pass_count = new_count
             insert_pass_record(self.serial_number, self.selected_model, self.batch, self.employee_id, self.job_card_id, dips)
         elif result == "0":
-            if self.selected_model == "BUTTON" and not all(self.gpio_validation.get(key, False) for key in GPIO_BUTTON_PINS):
+            if self.selected_model == "BUTTON":
                 queued = insert_gpio_fail_record(self.serial_number, self.selected_model, self.batch,
                     self.employee_id, self.job_card_id, dips, fail_reason, self.gpio_validation)
                 if not queued:
-                    QMessageBox.warning(self, "ERP queue error", "GPIO failure was not saved to the ERP queue. Check the local database.")
+                    QMessageBox.warning(self, "ERP queue error", "Button failure was not saved to the ERP queue. Check the local database.")
             else:
                 insert_fail_record(self.serial_number, self.selected_model, self.batch, self.employee_id, self.job_card_id, dips)
 
@@ -3078,9 +2581,11 @@ class Ui_MainWindow(QMainWindow):
 
 
             # ✅ Save graph data into database
-            self.save_graph(serial_no,encoded_graph_old,imageName, result,dips)
+            if not self.save_graph(serial_no,encoded_graph_old,imageName, result,dips):
+                return False
 
-            # ✅ Try sending data to server
+            # Upload all pending rows, including the current measurement.
+            return self.send_data_to_server()
 
         except Exception as e:
             print(f"❌ Error in save_data(): {e}")
@@ -3106,7 +2611,7 @@ class Ui_MainWindow(QMainWindow):
             # ~ ).decode("utf-8")
 
             # --- Insert into database ---
-            conn = sqlite3.connect("c60_btn_jig.db")
+            conn = sqlite3.connect(JIG_DB_FILE)
             cur = conn.cursor()
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS ampl_btndisp (
@@ -3138,6 +2643,45 @@ class Ui_MainWindow(QMainWindow):
             return False
 
 
+
+    def send_data_to_server(self):
+        """Upload pending graphs using TTNEW's MySQL table and payload."""
+        mysql_conn = None
+        mysql_cur = None
+        try:
+            with sqlite3.connect(JIG_DB_FILE) as local:
+                rows = local.execute("""
+                    SELECT sr_number, filename, graph, result, dips, date, id
+                    FROM ampl_btndisp
+                    WHERE COALESCE(LOWER(TRIM(data_send)), '') != 'yes'
+                    ORDER BY id
+                """).fetchall()
+                if not rows:
+                    return True
+                mysql_conn = get_mysql_conn()
+                mysql_cur = mysql_conn.cursor()
+                for row in rows:
+                    mysql_cur.execute("""
+                        INSERT INTO sub_button_displacement_data
+                        (sr_number, filename, graph, result, date)
+                        VALUES (%s, %s, %s, %s, %s)
+                    """, (row[0], row[1], row[2], row[3], row[5]))
+                    mysql_conn.commit()
+                    local.execute(
+                        "UPDATE ampl_btndisp SET data_send='yes' WHERE id=?", (row[6],))
+                    local.commit()
+            print(f"✅ Uploaded {len(rows)} records to MySQL")
+            return True
+        except Exception as exc:
+            print(f"❌ Error uploading SQL data: {exc}. Unsent rows remain queued.")
+            return False
+        finally:
+            for resource in (mysql_cur, mysql_conn):
+                if resource is not None:
+                    try:
+                        resource.close()
+                    except Exception:
+                        pass
 
     def pause_jobcard(self, checked=False):
         try:
