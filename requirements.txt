@@ -1,0 +1,10 @@
+# Raspberry Pi OS supplies PyQt5, gpiozero, and lgpio via apt.
+# Use a virtual environment created with --system-site-packages.
+pyserial
+matplotlib
+websocket-client
+reportlab
+requests
+Flask
+python-dotenv
+PyMySQL
