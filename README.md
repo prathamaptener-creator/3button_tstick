@@ -1,93 +1,90 @@
-# 3button_cassini
+# 3button_tstick
 
+Raspberry Pi 5 desktop application for the 3-button and T-stick test station. The app uses a PyQt5 interface, reads force data from an Arduino over serial, and controls the test fixture through a separate GRBL serial connection. The code also includes GPIO button checks, calibration, local SQLite logging, and ERP job-card integration.
 
+## Project files
 
-## Getting started
+| File | Purpose |
+| --- | --- |
+| `main.py` | Desktop launcher entry point, test interface, fixture communication, and calibration |
+| `erp.py` | ERP integration and local job-card records |
+| `config.py` | Required station configuration imported by both Python files |
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Keep a working `config.py` on the Pi alongside `main.py` and `erp.py`. Before starting, verify `ARDUINO_PORT`, `GRBL_PORT`, `SERIAL_BAUDRATE`, `GPIO_BUTTON_PINS`, and the station's ERP configuration. Keep live credentials and production databases off GitHub.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## One-time setup on Raspberry Pi 5
 
-## Add your files
+Use Raspberry Pi OS with a desktop session. Open Terminal as the user who will operate the station.
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+```bash
+sudo apt update
+sudo apt install -y git python3-pyqt5 python3-serial python3-matplotlib \
+  python3-websocket python3-reportlab python3-requests python3-flask \
+  python3-dotenv python3-gpiozero python3-lgpio python3-pymysql
 
+mkdir -p "$HOME/apps"
+cd "$HOME/apps"
+git clone https://github.com/prathamaptener-creator/3button_tstick.git
+cd 3button_tstick
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/pratham-group3631342/3button_cassini.git
-git branch -M main
-git push -uf origin main
+
+For a private repository, authenticate with read access to this repo before cloning. If the project is already cloned, open the existing checkout instead. Add the station's `config.py` if it is supplied separately.
+
+Connect the Arduino and GRBL controller and check their device paths.
+
+```bash
+ls -l /dev/serial/by-id/
+groups
 ```
 
-## Integrate with your tools
+If the USB serial devices belong to `dialout` and your account is missing that group, run `sudo usermod -aG dialout "$USER"` and log out and back in. Use the actual Arduino and GRBL device paths in `config.py`. When available, distinct `/dev/serial/by-id/` paths are preferable to numbered USB device paths.
 
-* [Set up project integrations](https://gitlab.com/pratham-group3631342/3button_cassini/-/settings/integrations)
+## Launch and verify
 
-## Collaborate with your team
+From a terminal in the Pi desktop session, run:
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+```bash
+cd "$HOME/apps/3button_tstick"
+/usr/bin/python3 main.py
+```
 
-## Test and Deploy
+Confirm the employee entry window opens. Verify the Arduino and GRBL connections, the configured GPIO inputs, and ERP connectivity on the station before production use. Run from the project directory so relative database and output paths resolve there.
 
-Use the built-in continuous integration in GitLab.
+## Add a one-click app shortcut
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+After the terminal launch works, run these commands as the same desktop user. They assume the checkout is in `$HOME/apps/3button_tstick`.
 
-***
+```bash
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 
-# Editing this README
+cat > "$HOME/.local/bin/start-3button-tstick" <<'LAUNCHER'
+#!/bin/sh
+cd "$HOME/apps/3button_tstick" || exit 1
+exec /usr/bin/python3 main.py
+LAUNCHER
+chmod +x "$HOME/.local/bin/start-3button-tstick"
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+cat > "$HOME/.local/share/applications/3button-tstick.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=3 Button / T-Stick
+Exec="$HOME/.local/bin/start-3button-tstick"
+Terminal=false
+Categories=Utility;
+DESKTOP
+```
 
-## Suggestions for a good README
+Open **3 Button / T-Stick** from the Pi application menu. If it closes immediately, run the terminal launch command again to see the error.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## Publish this README
 
-## Name
-Choose a self-explaining name for your project.
+In Windows Command Prompt, from your existing local `3button_tstick` folder, save this file as `README.md` and run:
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```cmd
+git add -- README.md
+git diff --cached --name-only
+git commit -m "Document Raspberry Pi setup and launcher"
+git push github main
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Before committing, confirm the staged list contains only `README.md`. These commands assume the `github` remote is already set to `prathamaptener-creator/3button_tstick`.
